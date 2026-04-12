@@ -12,6 +12,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any
+
+from env_config import load_project_env
+
+
+load_project_env()
 
 
 SUBMIT_ENDPOINT = "https://stt.api.cloud.yandex.net/stt/v3/recognizeFileAsync"
@@ -38,8 +44,9 @@ def build_headers(args: argparse.Namespace) -> dict[str, str]:
         "Authorization": build_auth_header(args),
         "Content-Type": "application/json",
     }
-    if args.folder_id:
-        headers["x-folder-id"] = args.folder_id
+    folder_id = args.folder_id or os.getenv("YANDEX_FOLDER_ID")
+    if folder_id:
+        headers["x-folder-id"] = folder_id
     return headers
 
 
@@ -89,6 +96,33 @@ def build_request_body(args: argparse.Namespace) -> dict:
     return body
 
 
+def submit_recognition(*, headers: dict[str, str], body: dict[str, object]) -> dict[str, Any]:
+    return request_json(SUBMIT_ENDPOINT, headers=headers, body=body, method="POST")
+
+
+def poll_operation(*, headers: dict[str, str], operation_id: str, poll_interval: float, timeout: float) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while True:
+        operation = request_json(f"{OPERATION_ENDPOINT}/{urllib.parse.quote(operation_id)}", headers=headers)
+        if operation.get("done"):
+            return operation
+        if time.monotonic() >= deadline:
+            raise SystemExit("Timed out while waiting for async recognition.")
+        time.sleep(poll_interval)
+
+
+def fetch_result(*, headers: dict[str, str], operation_id: str) -> dict[str, Any]:
+    return request_json(
+        f"{RESULT_ENDPOINT}?{urllib.parse.urlencode({'operation_id': operation_id})}",
+        headers=headers,
+    )
+
+
+def extract_transcript(result: dict[str, Any]) -> str:
+    alternatives = (((result.get("result") or {}).get("final") or {}).get("alternatives") or [])
+    return "\n".join(alt.get("text", "") for alt in alternatives if isinstance(alt, dict))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uri", required=True, help="Object Storage HTTPS URL to the audio file")
@@ -111,7 +145,7 @@ def main() -> int:
 
     headers = build_headers(args)
     submit_body = build_request_body(args)
-    operation = request_json(SUBMIT_ENDPOINT, headers=headers, body=submit_body, method="POST")
+    operation = submit_recognition(headers=headers, body=submit_body)
     print(json.dumps({"submitted": operation}, indent=2, ensure_ascii=True))
 
     operation_id = operation.get("id")
@@ -120,27 +154,19 @@ def main() -> int:
     if not operation_id:
         raise SystemExit("Recognition request did not return an operation id.")
 
-    deadline = time.monotonic() + args.timeout
-    while True:
-        op = request_json(f"{OPERATION_ENDPOINT}/{urllib.parse.quote(str(operation_id))}", headers=headers)
-        done = bool(op.get("done"))
-        print(json.dumps({"operation": op}, indent=2, ensure_ascii=True))
-        if done:
-            break
-        if time.monotonic() >= deadline:
-            raise SystemExit("Timed out while waiting for async recognition.")
-        time.sleep(args.poll_interval)
-
-    result = request_json(
-        f"{RESULT_ENDPOINT}?{urllib.parse.urlencode({'operation_id': str(operation_id)})}",
+    op = poll_operation(
         headers=headers,
+        operation_id=str(operation_id),
+        poll_interval=args.poll_interval,
+        timeout=args.timeout,
     )
+    print(json.dumps({"operation": op}, indent=2, ensure_ascii=True))
+
+    result = fetch_result(headers=headers, operation_id=str(operation_id))
     if args.raw_results:
         print(json.dumps({"result": result}, indent=2, ensure_ascii=True))
     else:
-        alternatives = (((result.get("result") or {}).get("final") or {}).get("alternatives") or [])
-        text = "\n".join(alt.get("text", "") for alt in alternatives if isinstance(alt, dict))
-        print(text)
+        print(extract_transcript(result))
     return 0
 
 

@@ -55,6 +55,11 @@ def main() -> int:
         "-y" if args.overwrite else "-n",
         "-i",
         str(input_path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-sn",
+        "-dn",
         "-ac",
         str(args.channels),
         "-ar",
@@ -62,7 +67,9 @@ def main() -> int:
         *FORMAT_PRESETS[args.format],
         str(output_path),
     ]
-    proc = subprocess.run(cmd)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 and proc.stderr:
+        print(proc.stderr.strip(), file=sys.stderr)
     return proc.returncode
 
 

@@ -13,6 +13,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from env_config import load_project_env
+
+
+load_project_env()
+
 
 SYNC_ENDPOINT = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
 
@@ -69,8 +74,9 @@ def main() -> int:
         "lang": args.lang,
         "topic": args.topic,
     }
-    if args.folder_id:
-        query["folderId"] = args.folder_id
+    folder_id = args.folder_id or os.getenv("YANDEX_FOLDER_ID")
+    if folder_id:
+        query["folderId"] = folder_id
     if args.format:
         query["format"] = args.format
     if args.sample_rate_hertz is not None:

@@ -9,6 +9,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from env_config import has_object_storage_env, load_project_env
+
+
+load_project_env()
+
 
 CONTAINER_FORMAT_MAP = {
     ".wav": "lpcm",
@@ -54,6 +59,13 @@ def main() -> int:
     parser.add_argument("--prefix", default=None, help="Optional prefix for generated chunk names")
     parser.add_argument("--dry-run", action="store_true", help="Only split and prepare manifest without API calls")
     args = parser.parse_args()
+
+    if has_object_storage_env():
+        raise SystemExit(
+            "Object Storage settings are present in .env or process env. "
+            "This project must use async transcription in that case. "
+            "Run scripts/transcribe_file_async.py instead of transcribe_local_in_parts.py."
+        )
 
     base_dir = Path(__file__).resolve().parent
     input_path = Path(args.input_file).expanduser().resolve()

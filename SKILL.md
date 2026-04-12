@@ -57,6 +57,8 @@ For recorded audio files:
 
 When the user asks for subtitles, meeting notes, or call transcripts, assume asynchronous recognition is the default unless there is a strong reason not to.
 
+If the project has Object Storage settings in `.env` or process env, treat asynchronous recognition as mandatory for file transcription workflows. In that case do not route recorded files through the local synchronous chunking path unless the user explicitly asks for low-level debugging of the sync endpoint.
+
 ## Audio Preparation
 
 Before sending audio:
@@ -72,6 +74,14 @@ Use the bundled scripts when helpful:
 - `scripts/prepare_audio.py` to convert inputs with `ffmpeg` into WAV, LINEAR16, OGG Opus, or MP3.
 - `scripts/split_audio_by_size.py` to break large local recordings into chunks under a maximum file size before upload or batch processing.
 - `scripts/transcribe_local_in_parts.py` to split a large local recording and run synchronous recognition over each chunk when you want to stay entirely on local files.
+- `scripts/transcribe_file_async.py` to prepare a local file, upload it to Object Storage, create a private URL, and run async recognition end-to-end.
+
+When Object Storage env is configured, prefer this order:
+
+1. `scripts/prepare_audio.py`
+2. `scripts/object_storage_upload.py` or `scripts/transcribe_file_async.py`
+3. `scripts/object_storage_presign.py` when a private URL is needed explicitly
+4. `scripts/speechkit_async_recognize_v3.py` or the full wrapper `scripts/transcribe_file_async.py`
 
 If you need protocol-level format guidance or common conversion pitfalls, read [references/gotchas.md](references/gotchas.md).
 
@@ -128,6 +138,7 @@ Useful command starters:
 - `python scripts/prepare_audio.py input.m4a output.wav --format wav --sample-rate 16000 --channels 1`
 - `python scripts/split_audio_by_size.py meeting.mp3 chunks/ --max-size-mb 20`
 - `python scripts/transcribe_local_in_parts.py meeting.mp3 workdir/ --max-size-mb 20 --lang ru-RU`
+- `python scripts/transcribe_file_async.py meeting.mp4 workdir/`
 - `python scripts/speechkit_sync_recognize.py file.wav --folder-id <folder-id> --format lpcm --sample-rate-hertz 16000`
 - `python scripts/speechkit_async_recognize_v3.py --uri https://storage.yandexcloud.net/.../file.wav --folder-id <folder-id> --poll`
 

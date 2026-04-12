@@ -36,6 +36,11 @@ def run_ffprobe(path: Path) -> dict:
     return json.loads(proc.stdout)
 
 
+def has_non_audio_streams(probe: dict) -> bool:
+    streams = probe.get("streams") or []
+    return any(stream.get("codec_type") != "audio" for stream in streams)
+
+
 def detect_extension(path: Path, probe: dict) -> str:
     suffix = path.suffix.lstrip(".").lower()
     if suffix:
@@ -45,26 +50,42 @@ def detect_extension(path: Path, probe: dict) -> str:
     return primary or "audio"
 
 
-def copy_segment(ffmpeg: str, input_path: Path, output_path: Path, start: float, duration: float) -> None:
+def copy_audio_segment(
+    ffmpeg: str,
+    input_path: Path,
+    output_path: Path,
+    start: float | None = None,
+    duration: float | None = None,
+) -> None:
     cmd = [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
         "error",
         "-y",
-        "-ss",
-        f"{start:.6f}",
-        "-t",
-        f"{duration:.6f}",
+    ]
+    if start is not None:
+        cmd.extend(["-ss", f"{start:.6f}"])
+    if duration is not None:
+        cmd.extend(["-t", f"{duration:.6f}"])
+    cmd.extend(
+        [
         "-i",
         str(input_path),
-        "-c",
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-c:a",
         "copy",
         str(output_path),
-    ]
+        ]
+    )
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"ffmpeg failed for segment starting at {start}")
+        segment_hint = f" for segment starting at {start}" if start is not None else ""
+        raise RuntimeError(proc.stderr.strip() or f"ffmpeg failed{segment_hint}")
 
 
 def max_bytes_from_args(args: argparse.Namespace) -> int:
@@ -127,17 +148,22 @@ def main() -> int:
     total_size = input_path.stat().st_size
     prefix = args.prefix or input_path.stem
     extension = detect_extension(input_path, probe)
+    drop_non_audio_streams = has_non_audio_streams(probe)
 
     if total_size <= max_bytes:
         output_path = output_dir / f"{prefix}_part001.{extension}"
         if output_path != input_path:
-            output_path.write_bytes(input_path.read_bytes())
+            if drop_non_audio_streams:
+                copy_audio_segment(ffmpeg, input_path, output_path)
+            else:
+                output_path.write_bytes(input_path.read_bytes())
         manifest = {
             "source": str(input_path),
             "max_bytes": max_bytes,
             "total_size_bytes": total_size,
             "duration_seconds": duration,
             "copied_without_split": True,
+            "dropped_non_audio_streams": drop_non_audio_streams,
             "parts": [
                 {
                     "path": str(output_path),
@@ -157,7 +183,7 @@ def main() -> int:
     def split_range(start: float, segment_duration: float) -> None:
         part_number = len(parts) + 1
         output_path = output_dir / f"{prefix}_part{part_number:03d}.{extension}"
-        copy_segment(ffmpeg, input_path, output_path, start, segment_duration)
+        copy_audio_segment(ffmpeg, input_path, output_path, start, segment_duration)
         part_size = output_path.stat().st_size
 
         if part_size <= max_bytes or segment_duration <= args.min_segment_seconds:
@@ -198,6 +224,7 @@ def main() -> int:
         "margin": args.margin,
         "total_size_bytes": total_size,
         "duration_seconds": duration,
+        "dropped_non_audio_streams": drop_non_audio_streams,
         "parts": parts,
     }
     print(json.dumps(manifest, indent=2, ensure_ascii=True))
