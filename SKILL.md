@@ -87,6 +87,29 @@ Adjust recognition options only when the task needs them:
 
 Avoid turning on every advanced option by default. Start with the smallest settings set that satisfies the request.
 
+## Speaker Information
+
+When the user wants speaker information in the transcript, prefer speaker-aware output instead of a flat transcript.
+
+- Enable speaker labeling or conversation analysis when the API path supports it.
+- If exact speaker names are unknown, use stable labels such as `Спикер 1`, `Спикер 2`, `Спикер 3`.
+- If the recording or filename gives enough context to identify a participant confidently, replace generic labels with names or roles.
+- If speaker assignment is uncertain, keep the generic speaker label and say that diarization was inferred automatically.
+
+Default speaker-aware output for meetings and calls:
+
+- One paragraph or block per speaker turn.
+- Optional timestamp per turn when timing is available or requested.
+- Cleaned text inside each speaker block when the user asks for readable output.
+
+Preferred shapes:
+
+- `[00:12] Спикер 1: ...`
+- `Спикер 2: ...`
+- Structured JSON with `speaker`, `start`, `end`, and `text` only when another system will consume it.
+
+Do not over-claim diarization quality. If the audio contains overlap, crosstalk, or poor channel separation, say that speaker attribution may be approximate.
+
 ## Validation Loop
 
 For any non-trivial integration:
@@ -131,3 +154,65 @@ Default to the smallest useful output:
 - Speaker-separated output only when speaker labeling or analysis is enabled.
 
 State any assumptions about normalization, timestamps, and speaker separation in the final result.
+
+## Output Location And Naming
+
+Write final user-facing results into `~/transcription`.
+
+- Create `~/transcription` if it does not exist.
+- Treat this directory as the default destination for raw transcripts, cleaned transcripts, subtitles, notes, and summaries produced from a recording.
+- Keep temporary chunking or scratch artifacts outside `~/transcription` unless the user explicitly asks to retain them there.
+
+Filename rules:
+
+- Include the event date first when it can be inferred from the source file, metadata, or user request.
+- Include a short Russian description of the event after the date.
+- Use 2 to 6 Russian words that identify the event, for example meeting topic, call type, or speaker/context.
+- Use lowercase words joined by underscores.
+- Keep the filename stable and descriptive instead of generic names like `transcript.txt` or `meeting.txt`.
+
+Preferred pattern:
+
+- `YYYY-MM-DD_описание_события.txt`
+- `YYYY-MM-DD_описание_события_cleaned.txt`
+- `YYYY-MM-DD_описание_события_summary.txt`
+- `YYYY-MM-DD_описание_события_notes.txt`
+
+If the exact event title is unclear, infer a conservative Russian description from the recording context and mention that it was inferred.
+
+## Transcript Post-Processing
+
+When the user asks to clean up a transcript after recognition, choose the lightest transformation that satisfies the request:
+
+- Use light cleanup for raw ASR text that should stay close to the original wording.
+- Use readable rewrite when the user wants a clean written-text version of spoken language.
+- Use structured extraction when the user wants notes, tasks, decisions, or a summary instead of the transcript itself.
+
+For light cleanup:
+
+- Remove obvious ASR noise such as repeated words, connection checks, filler bursts, and empty fragments.
+- Keep the original order and meaning.
+- Do not silently invent missing content.
+- Preserve profanity, jargon, and product names unless the user asks to sanitize them.
+
+For readable rewrite:
+
+- Turn spoken phrasing into normal written Russian or the requested language.
+- Split long ASR blocks into paragraphs.
+- Fix punctuation, casing, and obvious recognition artifacts.
+- Keep uncertain fragments conservative; mark uncertainty instead of guessing when meaning is unclear.
+- Preserve speaker boundaries when the user asked for speaker information.
+
+For structured extraction:
+
+- Derive the structure from the request: summary, meeting notes, roadmap, action items, decisions, risks, or Q&A.
+- Keep a link back to the raw or cleaned transcript when traceability matters.
+- Separate facts said in the recording from your own inferences.
+
+When producing multiple forms, prefer this order:
+
+1. Raw transcript
+2. Cleaned transcript
+3. Structured derivative such as notes or summary
+
+If the transcript quality is poor, say so explicitly and state whether the problem appears to come from audio quality, speaker overlap, domain vocabulary, or recognition errors.
