@@ -71,7 +71,29 @@ def request_json(url: str, *, headers: dict[str, str], body: dict | None = None,
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req) as response:
-            return json.load(response)
+            payload = response.read().decode("utf-8", errors="replace").strip()
+            if not payload:
+                return {}
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                entries: list[dict[str, Any]] = []
+                decoder = json.JSONDecoder()
+                index = 0
+                length = len(payload)
+                while index < length:
+                    while index < length and payload[index].isspace():
+                        index += 1
+                    if index >= length:
+                        break
+                    item, next_index = decoder.raw_decode(payload, index)
+                    if isinstance(item, dict):
+                        entries.append(item)
+                    index = next_index
+                if not entries:
+                    raise SystemExit(f"SpeechKit returned non-JSON response: {payload[:500]}")
+                return {"entries": entries}
+            return parsed if isinstance(parsed, dict) else {"value": parsed}
     except (urllib.error.HTTPError, urllib.error.URLError) as exc:
         raise SystemExit(format_request_error(exc)) from exc
 
@@ -119,8 +141,24 @@ def fetch_result(*, headers: dict[str, str], operation_id: str) -> dict[str, Any
 
 
 def extract_transcript(result: dict[str, Any]) -> str:
-    alternatives = (((result.get("result") or {}).get("final") or {}).get("alternatives") or [])
-    return "\n".join(alt.get("text", "") for alt in alternatives if isinstance(alt, dict))
+    texts: list[str] = []
+
+    def append_from_entry(entry: dict[str, Any]) -> None:
+        alternatives = (((entry.get("result") or {}).get("final") or {}).get("alternatives") or [])
+        for alt in alternatives:
+            if isinstance(alt, dict):
+                text = str(alt.get("text", "")).strip()
+                if text:
+                    texts.append(text)
+
+    if "entries" in result and isinstance(result["entries"], list):
+        for entry in result["entries"]:
+            if isinstance(entry, dict):
+                append_from_entry(entry)
+    else:
+        append_from_entry(result)
+
+    return "\n".join(texts)
 
 
 def main() -> int:
