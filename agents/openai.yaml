@@ -1,0 +1,4 @@
+interface:
+  display_name: "Yandex SpeechKit"
+  short_description: "Use Yandex SpeechKit STT v3 effectively"
+  default_prompt: "Use $yandex-speechkit to transcribe audio with Yandex SpeechKit STT v3."
