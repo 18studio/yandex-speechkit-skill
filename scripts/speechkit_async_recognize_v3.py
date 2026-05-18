@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from env_config import load_project_env
@@ -26,16 +27,16 @@ OPERATION_ENDPOINT = "https://operation.api.cloud.yandex.net/operations"
 
 
 def build_auth_header(args: argparse.Namespace) -> str:
-    if args.api_key:
-        return f"Api-Key {args.api_key}"
     if args.iam_token:
         return f"Bearer {args.iam_token}"
-    env_api_key = os.getenv("YANDEX_API_KEY") or os.getenv("API_KEY")
-    if env_api_key:
-        return f"Api-Key {env_api_key}"
+    if args.api_key:
+        return f"Api-Key {args.api_key}"
     env_iam = os.getenv("YANDEX_IAM_TOKEN") or os.getenv("IAM_TOKEN")
     if env_iam:
         return f"Bearer {env_iam}"
+    env_api_key = os.getenv("YANDEX_API_KEY") or os.getenv("API_KEY")
+    if env_api_key:
+        return f"Api-Key {env_api_key}"
     raise SystemExit("No API key or IAM token provided. Use flags or env vars.")
 
 
@@ -54,7 +55,16 @@ def format_request_error(exc: Exception) -> str:
     if isinstance(exc, urllib.error.HTTPError):
         body = exc.read().decode("utf-8", errors="replace").strip()
         detail = f": {body}" if body else ""
-        return f"SpeechKit request failed with HTTP {exc.code} {exc.reason}{detail}"
+        message = f"SpeechKit request failed with HTTP {exc.code} {exc.reason}{detail}"
+        if exc.code == 403:
+            message += (
+                "\nPermissionDenied diagnostics:"
+                "\n- check that the service account or principal has SpeechKit permissions;"
+                "\n- check YANDEX_FOLDER_ID / --folder-id and make sure it points to the intended folder;"
+                "\n- try --iam-token instead of --api-key for SpeechKit STT v3 async;"
+                "\n- check that the key/token belongs to the expected cloud and folder."
+            )
+        return message
     if isinstance(exc, urllib.error.URLError):
         reason = exc.reason
         if isinstance(reason, ssl.SSLCertVerificationError):
@@ -66,11 +76,18 @@ def format_request_error(exc: Exception) -> str:
     return f"SpeechKit request failed: {exc}"
 
 
-def request_json(url: str, *, headers: dict[str, str], body: dict | None = None, method: str = "GET") -> dict:
+def request_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: dict | None = None,
+    method: str = "GET",
+    timeout: float = 60.0,
+) -> dict:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             payload = response.read().decode("utf-8", errors="replace").strip()
             if not payload:
                 return {}
@@ -163,7 +180,7 @@ def extract_transcript(result: dict[str, Any]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--uri", required=True, help="Object Storage HTTPS URL to the audio file")
+    parser.add_argument("--uri", help="Object Storage HTTPS URL to the audio file")
     parser.add_argument("--model", default="general", help="Recognition model")
     parser.add_argument(
         "--container-audio-type",
@@ -176,35 +193,56 @@ def main() -> int:
     parser.add_argument("--api-key", help="Yandex API key")
     parser.add_argument("--iam-token", help="Yandex IAM token")
     parser.add_argument("--poll", action="store_true", help="Poll until the operation is done")
+    parser.add_argument("--operation-id", help="Existing async operation id to poll/fetch without submitting")
+    parser.add_argument("--fetch-only", action="store_true", help="Only fetch recognition result for --operation-id")
+    parser.add_argument("--result-file", help="Optional file path to save fetched raw result JSON")
+    parser.add_argument("--transcript-file", help="Optional file path to save extracted transcript")
     parser.add_argument("--poll-interval", type=float, default=5.0, help="Polling interval in seconds")
     parser.add_argument("--timeout", type=float, default=900.0, help="Maximum polling time in seconds")
     parser.add_argument("--raw-results", action="store_true", help="Print full result JSON")
     args = parser.parse_args()
 
     headers = build_headers(args)
-    submit_body = build_request_body(args)
-    operation = submit_recognition(headers=headers, body=submit_body)
-    print(json.dumps({"submitted": operation}, indent=2, ensure_ascii=True))
+    operation_id = args.operation_id
 
-    operation_id = operation.get("id")
-    if not args.poll:
-        return 0
     if not operation_id:
-        raise SystemExit("Recognition request did not return an operation id.")
-
-    op = poll_operation(
-        headers=headers,
-        operation_id=str(operation_id),
-        poll_interval=args.poll_interval,
-        timeout=args.timeout,
-    )
-    print(json.dumps({"operation": op}, indent=2, ensure_ascii=True))
+        if not args.uri:
+            raise SystemExit("--uri is required unless --operation-id is provided")
+        if args.fetch_only:
+            raise SystemExit("--fetch-only requires --operation-id")
+        submit_body = build_request_body(args)
+        operation = submit_recognition(headers=headers, body=submit_body)
+        print(json.dumps({"submitted": operation}, indent=2, ensure_ascii=True))
+        operation_id = operation.get("id")
+        if not args.poll:
+            return 0
+        if not operation_id:
+            raise SystemExit("Recognition request did not return an operation id.")
+    elif args.poll and not args.fetch_only:
+        op = poll_operation(
+            headers=headers,
+            operation_id=str(operation_id),
+            poll_interval=args.poll_interval,
+            timeout=args.timeout,
+        )
+        print(json.dumps({"operation": op}, indent=2, ensure_ascii=True))
 
     result = fetch_result(headers=headers, operation_id=str(operation_id))
+    if args.result_file:
+        Path(args.result_file).expanduser().resolve().write_text(
+            json.dumps(result, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+    transcript = extract_transcript(result)
+    if args.transcript_file:
+        Path(args.transcript_file).expanduser().resolve().write_text(
+            transcript + ("\n" if transcript else ""),
+            encoding="utf-8",
+        )
     if args.raw_results:
         print(json.dumps({"result": result}, indent=2, ensure_ascii=True))
     else:
-        print(extract_transcript(result))
+        print(transcript)
     return 0
 
 

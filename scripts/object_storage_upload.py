@@ -21,6 +21,9 @@ def main() -> int:
     parser.add_argument("--secret-key", help="Static secret key")
     parser.add_argument("--endpoint", help="Object Storage endpoint, default: https://storage.yandexcloud.net")
     parser.add_argument("--region", help="Signing region, default: ru-central1")
+    parser.add_argument("--retries", type=int, default=3, help="Attempts for transient upload failures")
+    parser.add_argument("--retry-backoff", type=float, default=2.0, help="Initial retry backoff in seconds")
+    parser.add_argument("--timeout", type=float, default=120.0, help="HTTP upload timeout in seconds")
     args = parser.parse_args()
 
     input_path = Path(args.input_file).expanduser().resolve()
@@ -34,7 +37,15 @@ def main() -> int:
         endpoint=args.endpoint,
         region=args.region,
     )
-    payload = upload_file(config, input_path, object_key=args.object_key, content_type=args.content_type)
+    payload = upload_file(
+        config,
+        input_path,
+        object_key=args.object_key,
+        content_type=args.content_type,
+        timeout=args.timeout,
+        retries=args.retries,
+        retry_backoff=args.retry_backoff,
+    )
     print(json.dumps(payload, indent=2, ensure_ascii=True))
     return 0
 

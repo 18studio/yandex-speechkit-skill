@@ -26,6 +26,8 @@ Read [references/mode-selection.md](references/mode-selection.md) when the mode 
 - Prefer API v3 for new projects.
 - Prefer gRPC clients generated from `yandex/cloud/ai/stt/v3/stt_service.proto`.
 - Prefer service-account authentication when possible.
+- For SpeechKit scripts, prefer `YANDEX_IAM_TOKEN` / `--iam-token` over `YANDEX_API_KEY` / `--api-key`; API keys are fallback credentials.
+- Treat Object Storage credentials and SpeechKit credentials as separate. S3-compatible Object Storage upload uses static access/secret keys, while SpeechKit recognition uses IAM token or API key and folder context.
 - Prefer explicit audio preparation over guessing server-side behavior.
 - Prefer handling `partial`, `final`, and `final_refinement` separately in streaming clients.
 - Prefer asynchronous recognition for long files and batch workflows.
@@ -75,6 +77,9 @@ Use the bundled scripts when helpful:
 - `scripts/split_audio_by_size.py` to break large local recordings into chunks under a maximum file size before upload or batch processing.
 - `scripts/transcribe_local_in_parts.py` to split a large local recording and run synchronous recognition over each chunk when you want to stay entirely on local files.
 - `scripts/transcribe_file_async.py` to prepare a local file, upload it to Object Storage, create a private URL, and run async recognition end-to-end.
+- `scripts/transcribe_file_async.py --prepared-file ... --skip-prepare` to reuse converted audio after a failed upload or recognition request.
+- `scripts/transcribe_file_async.py --skip-upload --source-url ...` to reuse an already uploaded object URL.
+- `scripts/transcribe_file_async.py <work_dir> --operation-id ...` to resume polling/fetching an already submitted async operation.
 
 When Object Storage env is configured, prefer this order:
 
@@ -139,12 +144,17 @@ Useful command starters:
 - `python scripts/split_audio_by_size.py meeting.mp3 chunks/ --max-size-mb 20`
 - `python scripts/transcribe_local_in_parts.py meeting.mp3 workdir/ --max-size-mb 20 --lang ru-RU`
 - `python scripts/transcribe_file_async.py meeting.mp4 workdir/`
+- `python scripts/transcribe_file_async.py meeting.mp4 workdir/ --prepared-file workdir/prepared/meeting.ogg --skip-prepare`
+- `python scripts/transcribe_file_async.py meeting.mp4 workdir/ --skip-prepare --skip-upload --source-url "https://..."`
+- `python scripts/transcribe_file_async.py workdir/ --operation-id <operation-id>`
 - `python scripts/speechkit_sync_recognize.py file.wav --folder-id <folder-id> --format lpcm --sample-rate-hertz 16000`
 - `python scripts/speechkit_async_recognize_v3.py --uri https://storage.yandexcloud.net/.../file.wav --folder-id <folder-id> --poll`
 
 ## Gotchas
 
 - Service-account authentication and folder handling behave differently from user-token flows; do not blindly send `folder_id` in every request.
+- HTTP 403 PermissionDenied usually means wrong SpeechKit principal, missing SpeechKit rights, wrong `YANDEX_FOLDER_ID`, or a key/token from a different cloud/folder. Retry with `--iam-token` when an API key fails.
+- Object Storage upload success does not prove SpeechKit permission. Check both credential sets independently.
 - Streaming is for real-time audio. For recorded files, synchronous or asynchronous modes are usually the correct choice.
 - In streaming mode, the first message must configure the session before audio chunks are sent.
 - If the client stops sending messages for too long, the streaming session is terminated.
@@ -220,10 +230,45 @@ For structured extraction:
 - Keep a link back to the raw or cleaned transcript when traceability matters.
 - Separate facts said in the recording from your own inferences.
 
+## Template-Based Transcript Analysis
+
+When the user provides or references an analysis template, use it as the target output schema for the transcript post-processing step. The template is not just formatting; it defines what signals to extract, how to group them, and what level of interpretation is allowed.
+
+Default flow:
+
+1. Produce or locate the raw transcript.
+2. Make a lightly cleaned transcript if ASR noise would make extraction unreliable.
+3. Read the requested template and identify its required sections, examples, wording rules, and forbidden shortcuts.
+4. Extract only transcript-backed signals that fit the template.
+5. Fill the template with structured analysis.
+6. Mark weakly supported or inferred points explicitly instead of presenting them as facts.
+7. Save the analysis as a separate derivative file next to the transcript, for example `YYYY-MM-DD_описание_события_ux_analysis.md`.
+
+For UX scenario templates such as `/Users/n.baryshnikov/Projects/18studio/records/ux-scenario-prompt.md`, extract UX signals rather than summarizing the whole meeting:
+
+- user type and context
+- user goal or job to be done
+- current user path and concrete steps
+- expectations at each step
+- friction, confusion, errors, manual workarounds, drop-off points
+- consequences for the user
+- success criteria
+- recommendations that follow from the observed problem
+
+Write UX analysis as an observer:
+
+- Describe what the user does, sees, expects, and misunderstands.
+- Separate fact, problem, consequence, and recommendation.
+- Avoid vague adjectives such as "convenient", "clear", "intuitive", or "beautiful" unless the transcript gives concrete evidence.
+- Do not turn every comment into a product requirement. Preserve uncertainty when the transcript is ambiguous.
+- Do not mix a UX problem with a technical implementation unless the template explicitly asks for technical recommendations.
+
+If the template and transcript conflict, keep the template structure but state that the transcript does not contain enough evidence for the missing section.
+
 When producing multiple forms, prefer this order:
 
 1. Raw transcript
 2. Cleaned transcript
-3. Structured derivative such as notes or summary
+3. Structured derivative such as notes, summary, or template-based analysis
 
 If the transcript quality is poor, say so explicitly and state whether the problem appears to come from audio quality, speaker overlap, domain vocabulary, or recognition errors.

@@ -5,8 +5,11 @@ Use this file when debugging SpeechKit integrations or preparing implementation 
 ## Authentication
 
 - Requests require authentication with an IAM token or API key.
+- The bundled SpeechKit scripts prefer IAM tokens over API keys. Use `YANDEX_IAM_TOKEN` or `--iam-token` for STT v3 async when possible.
 - Requests also commonly need a folder context.
 - When authenticating as a service account, do not blindly include `folder_id` in requests; SpeechKit can use the folder where the service account was created.
+- Object Storage credentials are separate from SpeechKit credentials. Uploading with S3 static keys only proves bucket access, not SpeechKit access.
+- For HTTP 403 PermissionDenied, check SpeechKit rights on the service account/principal, `YANDEX_FOLDER_ID`, whether the token/key belongs to the expected cloud and folder, and retry with `--iam-token` instead of `--api-key`.
 
 ## Streaming Session Rules
 
@@ -38,6 +41,7 @@ Preferred correction:
 - Do not trust the file extension alone.
 - Confirm actual codec and container before choosing request settings.
 - Convert awkward source formats before calling the API.
+- For synchronous `format=lpcm`, send raw LINEAR16 (`s16le`) bytes. Do not send a WAV container and label it as LPCM.
 - Keep timing fidelity when the user needs subtitles, timestamps, or diarization-like output.
 
 ## Advanced Features

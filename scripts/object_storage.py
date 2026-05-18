@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import http.client
 import hmac
 import mimetypes
 import os
+import shutil
+import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -99,6 +103,14 @@ def hash_payload(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def hash_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def sign(key: bytes, message: str) -> bytes:
     return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()
 
@@ -145,9 +157,14 @@ def upload_file(
     *,
     object_key: str,
     content_type: str | None = None,
+    timeout: float = 120.0,
+    retries: int = 3,
+    retry_backoff: float = 2.0,
 ) -> dict[str, str]:
-    payload = file_path.read_bytes()
-    payload_hash = hash_payload(payload)
+    if not file_path.is_file():
+        raise SystemExit(f"Upload source file not found: {file_path}")
+
+    payload_hash = hash_file(file_path)
     timestamp = now_utc()
     amz_date = timestamp.strftime("%Y%m%dT%H%M%SZ")
     datestamp = timestamp.strftime("%Y%m%d")
@@ -180,26 +197,52 @@ def upload_file(
         f"SignedHeaders={signed_headers}, Signature={signature}"
     )
 
-    request = urllib.request.Request(
-        object_url(config, object_key),
-        data=payload,
-        method="PUT",
-        headers={
-            "Authorization": authorization,
-            "Content-Type": resolved_content_type,
-            "Host": host,
-            "X-Amz-Content-SHA256": payload_hash,
-            "X-Amz-Date": amz_date,
-        },
-    )
-    try:
-        with urllib.request.urlopen(request) as response:
-            status = str(response.status)
-            etag = response.headers.get("ETag", "")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
-        detail = f": {body}" if body else ""
-        raise SystemExit(f"Object Storage upload failed with HTTP {exc.code} {exc.reason}{detail}") from exc
+    request_headers = {
+        "Authorization": authorization,
+        "Content-Type": resolved_content_type,
+        "Host": host,
+        "X-Amz-Content-SHA256": payload_hash,
+        "X-Amz-Date": amz_date,
+    }
+
+    last_error: BaseException | None = None
+    for attempt in range(1, max(retries, 1) + 1):
+        try:
+            status, etag = put_file_stream(
+                object_url(config, object_key),
+                file_path,
+                headers=request_headers,
+                timeout=timeout,
+            )
+            break
+        except ObjectStorageUploadHTTPError as exc:
+            raise SystemExit(str(exc)) from exc
+        except (BrokenPipeError, TimeoutError, OSError, urllib.error.URLError) as exc:
+            last_error = exc
+            if attempt < max(retries, 1):
+                time.sleep(retry_backoff * (2 ** (attempt - 1)))
+    else:
+        curl_status = upload_with_curl(
+            object_url(config, object_key),
+            file_path,
+            headers=request_headers,
+            timeout=timeout,
+        )
+        if curl_status is None:
+            put_url = presign_put_url(config, object_key, expires_in=3600)
+            curl_status = upload_with_curl(
+                put_url,
+                file_path,
+                headers={"Content-Type": resolved_content_type},
+                timeout=timeout,
+            )
+        if curl_status is None:
+            raise SystemExit(
+                "Object Storage upload failed after retries and curl fallback. "
+                f"Last error: {last_error}. Check network stability, bucket permissions, "
+                "Object Storage credentials, and try reusing the prepared file with --skip-prepare."
+            )
+        status, etag = curl_status, ""
 
     return {
         "bucket": config.bucket,
@@ -212,7 +255,90 @@ def upload_file(
     }
 
 
+class ObjectStorageUploadHTTPError(RuntimeError):
+    pass
+
+
+def put_file_stream(
+    url: str,
+    file_path: Path,
+    *,
+    headers: dict[str, str],
+    timeout: float,
+    chunk_size: int = 1024 * 1024,
+) -> tuple[str, str]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Unsupported URL scheme for upload: {parsed.scheme}")
+
+    connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    connection = connection_class(parsed.netloc, timeout=timeout)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    try:
+        connection.putrequest("PUT", path, skip_host=True, skip_accept_encoding=True)
+        for name, value in headers.items():
+            connection.putheader(name, value)
+        connection.putheader("Content-Length", str(file_path.stat().st_size))
+        connection.endheaders()
+        with file_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(chunk_size), b""):
+                connection.send(chunk)
+        response = connection.getresponse()
+        body = response.read().decode("utf-8", errors="replace").strip()
+        if response.status >= 400:
+            detail = f": {body}" if body else ""
+            raise ObjectStorageUploadHTTPError(
+                f"Object Storage upload failed with HTTP {response.status} {response.reason}{detail}"
+            )
+        return str(response.status), response.getheader("ETag", "")
+    finally:
+        connection.close()
+
+
+def upload_with_curl(
+    url: str,
+    file_path: Path,
+    *,
+    headers: dict[str, str],
+    timeout: float,
+) -> str | None:
+    curl = shutil.which("curl")
+    if not curl:
+        return None
+    cmd = [
+        curl,
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--request",
+        "PUT",
+        "--max-time",
+        str(int(timeout)),
+        "--upload-file",
+        str(file_path),
+    ]
+    for name, value in headers.items():
+        cmd.extend(["--header", f"{name}: {value}"])
+    cmd.append(url)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return "200"
+    return None
+
+
+def presign_put_url(config: StorageConfig, object_key: str, *, expires_in: int = 3600) -> str:
+    return presign_url(config, object_key, method="PUT", expires_in=expires_in)
+
+
 def presign_get_url(config: StorageConfig, object_key: str, *, expires_in: int = 3600) -> str:
+    return presign_url(config, object_key, method="GET", expires_in=expires_in)
+
+
+def presign_url(config: StorageConfig, object_key: str, *, method: str, expires_in: int = 3600) -> str:
     if expires_in <= 0:
         raise SystemExit("--expires-in must be greater than zero")
     if expires_in > MAX_PRESIGN_TTL:
@@ -237,7 +363,7 @@ def presign_get_url(config: StorageConfig, object_key: str, *, expires_in: int =
     canonical_querystring = urllib.parse.urlencode(sorted(query.items()), quote_via=urllib.parse.quote, safe="-_.~")
     canonical_headers = f"host:{host}\n"
     canonical_request = build_canonical_request(
-        "GET",
+        method,
         canonical_uri,
         canonical_querystring,
         canonical_headers,
